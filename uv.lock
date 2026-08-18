@@ -291,13 +291,17 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "flet", extra = ["all"] },
+    { name = "python-dotenv" },
     { name = "requests" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "flet", extras = ["all"], specifier = ">=0.86.5" },
+    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "requests" },
+    { name = "websockets", specifier = ">=15.0" },
 ]
 
 [[package]]

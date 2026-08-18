@@ -11,4 +11,7 @@ wheels/
 .venv
 
 # Other
-static
+#static
+
+# Local server config
+#.env
