@@ -45,6 +45,8 @@ class RemoteState:
     busy: bool = False
     activity: list[ActivityItem] = field(default_factory=list)
 
+    touch_mode: str = "move"
+
     def add_activity(self, label: str, ok: bool, detail: str = "") -> None:
         self.activity.insert(
             0,

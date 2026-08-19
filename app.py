@@ -37,6 +37,7 @@ from tv_client import TVClient, wake_on_lan
 
 TAB_DEFS = [
     ("remote", "Remote", ft.Icons.DASHBOARD),
+    ("touch", "Тачпад", ft.Icons.TOUCH_APP),
     ("power", "Питание", ft.Icons.POWER_SETTINGS_NEW),
     ("sound", "Звук", ft.Icons.VOLUME_UP),
     ("media", "Медиа", ft.Icons.PLAY_CIRCLE),
@@ -270,6 +271,7 @@ class LGRemoteApp:
     def _build_section(self) -> ft.Control:
         builders: dict[str, Callable[[], ft.Control]] = {
             "remote": self._remote_screen,
+            "touch": self._touch_screen,
             "power": self._power_screen,
             "sound": self._sound_screen,
             "media": self._media_screen,
@@ -384,6 +386,37 @@ class LGRemoteApp:
         except Exception as exc:
             self.state.add_activity("Wake-on-LAN", False, str(exc))
             self._show_message("Wake-on-LAN", str(exc))
+
+    def _screen_toggle(self, uri: str, payload: dict[str, Any], label: str) -> None:
+        self.page.run_thread(self._screen_toggle_worker, uri, payload, label)
+
+    def _screen_toggle_worker(self, uri: str, payload: dict[str, Any], label: str) -> None:
+        client = self.client
+        if client is None or not client.is_open() or not client.paired:
+            self.state.add_activity(label, False, "Телевизор не подключён")
+            self.refresh_view()
+            return
+
+        resp = client.request(uri, payload)
+        if self._ok(resp):
+            self.state.add_activity(label, True)
+            self.refresh_view()
+            return
+
+        err_text = self._error_text(resp)
+        if "404" in err_text:
+            self.state.add_activity(label, False, "Метод не поддерживается этим ТВ")
+            self.refresh_view()
+            self._show_message(
+                label,
+                "Этот телевизор не поддерживает функцию выключения/включения экрана "
+                "без полного выключения.\n\n"
+                "Используйте «Выключить телевизор» для полного выключения.",
+            )
+            return
+
+        self.state.add_activity(label, False, err_text)
+        self.refresh_view()
 
     # ------------------------------------------------------------------
     # Request helpers
@@ -812,6 +845,266 @@ class LGRemoteApp:
         )
 
     # ------------------------------------------------------------------
+    # TOUCH
+    # ------------------------------------------------------------------
+
+    def _touch_screen(self) -> ft.Control:
+        self._touch_last_send = 0.0
+        self._touch_acc_x = 0.0
+        self._touch_acc_y = 0.0
+
+        mode = self.state.touch_mode
+        mode_label = {"move": "Курсор", "drag": "Перетаскивание", "scroll": "Прокрутка"}.get(mode, mode)
+        mode_icon = {
+            "move": ft.Icons.OPEN_WITH,
+            "drag": ft.Icons.DRAG_INDICATOR,
+            "scroll": ft.Icons.SWAP_VERT,
+        }.get(mode, ft.Icons.OPEN_WITH)
+
+        def set_mode(m: str):
+            def handler(_e: ft.Event) -> None:
+                self.state.touch_mode = m
+                self.refresh_view()
+            return handler
+
+        def on_pan_update(e: ft.DragUpdateEvent) -> None:
+            if e.local_delta is None:
+                return
+            dx = e.local_delta.x
+            dy = e.local_delta.y
+            m = self.state.touch_mode
+            now = time.monotonic()
+
+            if m == "scroll":
+                self._touch_acc_x += dx
+                self._touch_acc_y += dy
+                if now - self._touch_last_send >= 0.05 and (abs(self._touch_acc_x) > 2 or abs(self._touch_acc_y) > 2):
+                    self._touch_last_send = now
+                    sx = int(self._touch_acc_x)
+                    sy = int(self._touch_acc_y)
+                    self._touch_acc_x = 0.0
+                    self._touch_acc_y = 0.0
+                    client = self.client
+                    if client is not None and client.pointer_connected:
+                        client.scroll(sx, sy)
+            else:
+                scale = 3.0
+                self._touch_acc_x += dx * scale
+                self._touch_acc_y += dy * scale
+                if now - self._touch_last_send >= 0.033:
+                    self._touch_last_send = now
+                    mx = int(self._touch_acc_x)
+                    my = int(self._touch_acc_y)
+                    self._touch_acc_x -= mx
+                    self._touch_acc_y -= my
+                    client = self.client
+                    if client is not None and client.pointer_connected:
+                        if m == "drag":
+                            client.drag(mx, my, down=1)
+                        else:
+                            client.move(mx, my)
+
+        def on_pan_start(_e: ft.DragStartEvent) -> None:
+            client = self.client
+            if client is not None and not client.pointer_connected:
+                self.page.run_thread(client.connect_pointer, 8)
+
+        def on_pan_end(_e: ft.DragEndEvent) -> None:
+            if self.state.touch_mode == "drag":
+                client = self.client
+                if client is not None and client.pointer_connected:
+                    client.drag(0, 0, down=0)
+
+        def on_tap(_e: ft.TapEvent) -> None:
+            self._touch_pointer_op("click", "Нажатие")
+
+        def on_double_tap(_e: ft.Event) -> None:
+            self._touch_pointer_op("button", "HOME", name="HOME")
+
+        def on_long_press(_e: ft.Event) -> None:
+            self._touch_pointer_op("button", "MENU", name="MENU")
+
+        touchpad = ft.GestureDetector(
+            content=ft.Container(
+                height=300,
+                border_radius=22,
+                border=border(),
+                gradient=ft.LinearGradient(
+                    begin=ft.Alignment.TOP_LEFT,
+                    end=ft.Alignment.BOTTOM_RIGHT,
+                    colors=["#18101E38", "#220E1A2E", "#1A0C1626"],
+                ),
+                shadow=shadow(24, "40"),
+                alignment=ft.Alignment.CENTER,
+                content=ft.Column(
+                    spacing=6,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Icon(mode_icon, size=38, color=C.CYAN),
+                        ft.Text(mode_label, size=13, color=C.TEXT_2),
+                        ft.Container(
+                            width=40,
+                            height=2,
+                            border_radius=2,
+                            bgcolor=C.CYAN,
+                            opacity=0.5,
+                        ),
+                        ft.Text(
+                            "Свайп — движение\nНажатие — клик\nДвойной тап — Домой\nУдержание — Меню",
+                            size=10,
+                            color=C.TEXT_3,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                    ],
+                ),
+            ),
+            on_pan_update=on_pan_update,
+            on_pan_start=on_pan_start,
+            on_pan_end=on_pan_end,
+            on_tap_up=on_tap,
+            on_double_tap=on_double_tap,
+            on_long_press_start=on_long_press,
+        )
+
+        mode_buttons = ft.Row(
+            spacing=8,
+            controls=[
+                ft.Container(
+                    expand=True,
+                    content=pill_button(
+                        "Курсор",
+                        icon=ft.Icons.OPEN_WITH,
+                        icon_color=C.CYAN if mode == "move" else C.TEXT,
+                        active=mode == "move",
+                        height=48,
+                        on_click=set_mode("move"),
+                    ),
+                ),
+                ft.Container(
+                    expand=True,
+                    content=pill_button(
+                        "Тащить",
+                        icon=ft.Icons.DRAG_INDICATOR,
+                        icon_color=C.CYAN if mode == "drag" else C.TEXT,
+                        active=mode == "drag",
+                        height=48,
+                        on_click=set_mode("drag"),
+                    ),
+                ),
+                ft.Container(
+                    expand=True,
+                    content=pill_button(
+                        "Скролл",
+                        icon=ft.Icons.SWAP_VERT,
+                        icon_color=C.CYAN if mode == "scroll" else C.TEXT,
+                        active=mode == "scroll",
+                        height=48,
+                        on_click=set_mode("scroll"),
+                    ),
+                ),
+            ],
+        )
+
+        nav_row = ft.Row(
+            spacing=8,
+            controls=[
+                ft.Container(
+                    expand=True,
+                    content=pill_button(
+                        "Назад",
+                        icon=ft.Icons.ARROW_BACK,
+                        height=52,
+                        on_click=lambda e: self._touch_pointer_op("button", "Назад", name="BACK"),
+                    ),
+                ),
+                ft.Container(
+                    width=64,
+                    content=remote_circle(
+                        icon=ft.Icons.MOUSE,
+                        size=64,
+                        on_click=lambda e: self._touch_pointer_op("click", "Клик"),
+                    ),
+                ),
+                ft.Container(
+                    expand=True,
+                    content=pill_button(
+                        "Домой",
+                        icon=ft.Icons.HOME,
+                        height=52,
+                        on_click=lambda e: self._touch_pointer_op("button", "Домой", name="HOME"),
+                    ),
+                ),
+            ],
+        )
+
+        nav_row2 = ft.Row(
+            spacing=8,
+            controls=[
+                ft.Container(
+                    expand=True,
+                    content=pill_button(
+                        "Меню",
+                        icon=ft.Icons.MENU,
+                        height=52,
+                        on_click=lambda e: self._touch_pointer_op("button", "Меню", name="MENU"),
+                    ),
+                ),
+                ft.Container(
+                    expand=True,
+                    content=pill_button(
+                        "Вверх",
+                        icon=ft.Icons.KEYBOARD_ARROW_UP,
+                        height=52,
+                        on_click=lambda e: self._touch_pointer_op("button", "Вверх", name="UP"),
+                    ),
+                ),
+                ft.Container(
+                    expand=True,
+                    content=pill_button(
+                        "Вниз",
+                        icon=ft.Icons.KEYBOARD_ARROW_DOWN,
+                        height=52,
+                        on_click=lambda e: self._touch_pointer_op("button", "Вниз", name="DOWN"),
+                    ),
+                ),
+            ],
+        )
+
+        return ft.Column(
+            spacing=14,
+            controls=[
+                section_title("Тачпад", "Сенсорное управление курсором"),
+                touchpad,
+                mode_buttons,
+                nav_row,
+                nav_row2,
+            ],
+        )
+
+    def _touch_pointer_op(self, op: str, label: str, *, name: str = "") -> None:
+        self.page.run_thread(self._touch_pointer_worker, op, label, name)
+
+    def _touch_pointer_worker(self, op: str, label: str, name: str) -> None:
+        client = self.client
+        if client is None or not client.paired:
+            self.state.add_activity(label, False, "Нет подключения")
+            self.refresh_view()
+            return
+        if not client.pointer_connected:
+            client.connect_pointer(timeout=8)
+        if not client.pointer_connected:
+            self.state.add_activity(label, False, "Pointer socket недоступен")
+            self.refresh_view()
+            return
+        if op == "click":
+            client.click()
+        elif op == "button":
+            client.button(name)
+        self.state.add_activity(label, True)
+        self.refresh_view()
+
+    # ------------------------------------------------------------------
     # POWER
     # ------------------------------------------------------------------
 
@@ -870,20 +1163,20 @@ class LGRemoteApp:
                     "Выключить экран",
                     icon=ft.Icons.TV_OFF,
                     icon_color=C.RED,
-                    on_click=lambda e: self._request(
+                    on_click=lambda e: self._screen_toggle(
                         PowerControl.COMMANDS["screen_off"]["uri"],
                         PowerControl.COMMANDS["screen_off"].get("payload", {}),
-                        label="Выключить экран",
+                        "Выключить экран",
                     ),
                 ),
                 pill_button(
                     "Включить экран",
                     icon=ft.Icons.TV,
                     icon_color=C.BLUE,
-                    on_click=lambda e: self._request(
+                    on_click=lambda e: self._screen_toggle(
                         PowerControl.COMMANDS["screen_on"]["uri"],
                         PowerControl.COMMANDS["screen_on"].get("payload", {}),
-                        label="Включить экран",
+                        "Включить экран",
                     ),
                 ),
             ],
