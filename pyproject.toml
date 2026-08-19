@@ -1,7 +1,7 @@
 [project]
 name = "flet-app"
 version = "0.1.0"
-description = "Add your description here"
+description = "LG webOS remote control with a mobile-first Flet UI"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

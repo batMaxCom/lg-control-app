@@ -10,9 +10,12 @@ and ``request``.
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
+import re
+import socket
 import sys
 import threading
 from pathlib import Path
@@ -181,6 +184,18 @@ def probe_ws(host: str, port: int, timeout: float = 2.0) -> bool:
         return False
 
 
+def wake_on_lan(mac: str, broadcast: str = "255.255.255.255", port: int = 9) -> None:
+    """Send a Wake-on-LAN magic packet."""
+    cleaned = re.sub(r"[^0-9A-Fa-f]", "", mac or "")
+    if len(cleaned) != 12:
+        raise ValueError("MAC-адрес должен содержать 12 hex-символов")
+    mac_bytes = bytes.fromhex(cleaned)
+    packet = b"\xff" * 6 + mac_bytes * 16
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.sendto(packet, (broadcast, port))
+
+
 class TVClient:
     """SSAP client over WebSocket with pairing support."""
 
@@ -243,13 +258,36 @@ class TVClient:
             return False
 
     def close(self) -> None:
-        if self._loop is not None:
+        loop = self._loop
+        thread = self._thread
+        if loop is not None:
             try:
-                asyncio.run_coroutine_threadsafe(self._close_async(), self._loop).result(timeout=5)
+                asyncio.run_coroutine_threadsafe(self._close_async(), loop).result(timeout=5)
             except Exception:
                 pass
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._loop = None
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        self._loop = None
+        self._thread = None
+        self.connected = False
+        self.paired = False
+        self.pointer_connected = False
+
+    def forget_client_key(self) -> bool:
+        """Remove the stored pairing key. Reconnect afterwards."""
+        try:
+            path = Path(self.client_key_file)
+            if path.exists():
+                path.unlink()
+            self.paired = False
+            return True
+        except OSError as exc:
+            logger.warning("Не удалось удалить client-key: %s", exc)
+            return False
 
     # ── commands ───────────────────────────────────────────────────────────
     def request(self, uri: str, payload: dict, timeout: float = 8.0) -> dict:
@@ -259,8 +297,11 @@ class TVClient:
         fut = asyncio.run_coroutine_threadsafe(self._request_async(uri, payload), self._loop)
         try:
             return fut.result(timeout=timeout)
-        except asyncio.TimeoutError:
+        except (TimeoutError, concurrent.futures.TimeoutError):
+            fut.cancel()
             return {"type": "error", "error": {"code": "timeout", "message": "Нет ответа от ТВ"}}
+        except Exception as exc:
+            return {"type": "error", "error": {"code": "request", "message": str(exc)}}
 
     # ── pointer / input socket (raw navigation) ────────────────────────────
     def connect_pointer(self, timeout: float = 10.0) -> bool:
@@ -283,12 +324,13 @@ class TVClient:
             self._pointer_lock.release()
 
     def pointer_send(self, data: str, timeout: float = 5.0) -> None:
-        """Send a raw text command to the pointer socket."""
+        """Send a line-based command to the pointer socket."""
         if self._loop is None or self._pointer_ws is None:
             logger.warning("Pointer socket не подключён, команда пропущена: %s", data.strip())
             return
-        _console("send", f"POINTER >> {data.strip()}")
-        fut = asyncio.run_coroutine_threadsafe(self._pointer_ws.send(data), self._loop)
+        frame = data.rstrip("\n") + "\n\n"
+        _console("send", f"POINTER >> {frame.strip()}")
+        fut = asyncio.run_coroutine_threadsafe(self._pointer_ws.send(frame), self._loop)
         try:
             fut.result(timeout=timeout)
         except Exception as exc:
@@ -306,9 +348,9 @@ class TVClient:
         """Click at the current pointer position: type:click\\n"""
         self.pointer_send("type:click\n")
 
-    def move(self, x: int, y: int) -> None:
-        """Move the pointer: type:move\\nx:<x>\\ny:<y>\\n"""
-        self.pointer_send(f"type:move\nx:{x}\ny:{y}\n")
+    def move(self, dx: int, dy: int) -> None:
+        """Move the pointer relatively by dx/dy."""
+        self.pointer_send(f"type:move\ndx:{dx}\ndy:{dy}\ndown:0\n")
 
     def drag(self, dx: int, dy: int, down: int = 1) -> None:
         """Drag the pointer: type:move\\ndx:<dx>\\ndy:<dy>\\ndown:<down>\\n"""
@@ -394,6 +436,8 @@ class TVClient:
 
     # ── internals ──────────────────────────────────────────────────────────
     async def _connect_async(self) -> bool:
+        if self.is_open():
+            return True
         for attempt in range(self.max_retries):
             uri = f"ws://{self.ip}:{self.port}"
             logger.info("🔌 Подключение к %s (попытка %d/%d)", uri, attempt + 1, self.max_retries)
@@ -452,6 +496,8 @@ class TVClient:
                     self._notify_state()
                     continue
                 return msg
+            self.paired = True
+            self._notify_state()
             return msg
         return None
 
@@ -478,8 +524,11 @@ class TVClient:
         self._pending[msg_id] = future
         msg = {"type": "request", "id": msg_id, "uri": uri, "payload": payload}
         _log_send(json.dumps(msg))
-        await self.websocket.send(json.dumps(msg))
-        return await future
+        try:
+            await self.websocket.send(json.dumps(msg))
+            return await future
+        finally:
+            self._pending.pop(msg_id, None)
 
     async def _connect_pointer_async(self) -> bool:
         # 1) Canonical way: ask the TV for the socket path.
@@ -551,8 +600,9 @@ class TVClient:
             payload = msg.get("payload") or {}
             client_key = payload.get("client-key")
             if client_key:
-                self.paired = True
                 self._save_client_key(client_key)
+            if client_key or msg_id == REGISTER_ID or mtype == "registered":
+                self.paired = True
                 self._notify_state()
             fut = self._pending.pop(msg_id, None) if msg_id else None
             if fut is not None and not fut.done():
