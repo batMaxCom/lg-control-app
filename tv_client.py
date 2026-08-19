@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -21,6 +22,37 @@ from urllib.parse import urlparse
 import websockets
 
 logger = logging.getLogger("tv_client")
+
+# ── Coloured console logging for WebSocket traffic ───────────────────────────
+_RESET = "\033[0m"
+_SEND = "\033[32m"      # green   -> исходящие
+_RECV = "\033[36m"      # cyan    -> входящие
+_INFO = "\033[33m"      # yellow  -> служебные события
+_ERR = "\033[31m"       # red     -> ошибки
+
+
+def _console(kind: str, text: str) -> None:
+    color = {"send": _SEND, "recv": _RECV, "info": _INFO, "err": _ERR}.get(kind, _INFO)
+    print(f"{color}{text}{_RESET}", file=sys.stdout)
+
+
+def _fmt(prefix: str, raw: Any) -> str:
+    """Pretty-print JSON payloads; keep non-JSON (e.g. pointer) inline."""
+    s = raw.strip() if isinstance(raw, str) else str(raw).strip()
+    if s.startswith("{") or s.startswith("["):
+        try:
+            return f"{prefix}\n{json.dumps(json.loads(s), ensure_ascii=False, indent=2)}"
+        except Exception:
+            pass
+    return f"{prefix} {s}"
+
+
+def _log_send(payload: Any) -> None:
+    _console("send", _fmt("SEND >>", payload))
+
+
+def _log_recv(raw: Any) -> None:
+    _console("recv", _fmt("RECV <<", raw))
 
 REGISTER_ID = "register_0"
 REGISTER_TIMEOUT = 12.0
@@ -45,34 +77,10 @@ SIGNATURE = (
 MANIFEST = {
     "manifestVersion": 1,
     "appVersion": "1.1",
-    "signed": {
-        "created": "20140509",
-        "appId": "com.lge.test",
-        "vendorId": "com.lge",
-        "localizedAppNames": {"": "LG Remote App"},
-        "localizedVendorNames": {"": "LG Electronics"},
-        "serial": "2f930e2d2cfe083771f68e4fe7bb07",
-        "permissions": [
-            "TEST_SECURE",
-            "CONTROL_INPUT_TEXT",
-            "CONTROL_MOUSE_AND_KEYBOARD",
-            "READ_INSTALLED_APPS",
-            "READ_LGE_SDX",
-            "READ_NOTIFICATIONS",
-            "SEARCH",
-            "WRITE_SETTINGS",
-            "WRITE_NOTIFICATION_ALERT",
-            "CONTROL_POWER",
-            "READ_CURRENT_CHANNEL",
-            "READ_RUNNING_APPS",
-            "READ_UPDATE_INFO",
-            "UPDATE_FROM_REMOTE_APP",
-            "READ_LGE_TV_INPUT_EVENTS",
-            "READ_TV_CURRENT_TIME",
-        ],
-        "signatures": [{"signature": SIGNATURE, "signatureVersion": 1}],
-    },
     "permissions": [
+        "LAUNCH",
+        "READ_INSTALLED_APPS",
+        "READ_TV_CURRENT_TIME",
         "LAUNCH",
         "LAUNCH_WEBAPP",
         "APP_TO_APP",
@@ -123,25 +131,36 @@ MANIFEST = {
         "DELETE_SELECT_CHANNEL",
         "CONTROL_CHANNEL_GROUP",
         "SCAN_TV_CHANNELS",
-"CONTROL_TV_POWER",
+        "CONTROL_TV_POWER",
         "CONTROL_WOL",
-        # Права из signed-блока: некоторые webOS выдают доступ (listApps, IME,
-        # pointer) только если они заявлены в верхнем списке permissions.
-        "TEST_SECURE",
-        "READ_INSTALLED_APPS",
-        "READ_LGE_SDX",
-        "READ_NOTIFICATIONS",
-        "SEARCH",
-        "WRITE_SETTINGS",
-        "WRITE_NOTIFICATION_ALERT",
-        "READ_UPDATE_INFO",
-        "UPDATE_FROM_REMOTE_APP",
-        "READ_LGE_TV_INPUT_EVENTS",
-        "CONTROL_INPUT_TEXT",
-        "CONTROL_MOUSE_AND_KEYBOARD",
-        "CONTROL_INPUT",
-        "CONTROL_INPUT_KEYBOARD",
     ],
+    "signatures": [{"signature": SIGNATURE, "signatureVersion": 1}],
+    "signed": {
+        "appId": "com.lge.test",
+        "created": "20140509",
+        "localizedAppNames": {"": "LG Remote App"},
+        "localizedVendorNames": {"": "LG Electronics"},
+        "serial": "2f930e2d2cfe083771f68e4fe7bb07",
+        "vendorId": "com.lge",
+        "permissions": [
+            "TEST_SECURE",
+            "CONTROL_INPUT_TEXT",
+            "CONTROL_MOUSE_AND_KEYBOARD",
+            "READ_INSTALLED_APPS",
+            "READ_LGE_SDX",
+            "READ_NOTIFICATIONS",
+            "SEARCH",
+            "WRITE_SETTINGS",
+            "WRITE_NOTIFICATION_ALERT",
+            "CONTROL_POWER",
+            "READ_CURRENT_CHANNEL",
+            "READ_RUNNING_APPS",
+            "READ_UPDATE_INFO",
+            "UPDATE_FROM_REMOTE_APP",
+            "READ_LGE_TV_INPUT_EVENTS",
+            "READ_TV_CURRENT_TIME",
+        ],
+    },
 }
 
 
@@ -268,6 +287,7 @@ class TVClient:
         if self._loop is None or self._pointer_ws is None:
             logger.warning("Pointer socket не подключён, команда пропущена: %s", data.strip())
             return
+        _console("send", f"POINTER >> {data.strip()}")
         fut = asyncio.run_coroutine_threadsafe(self._pointer_ws.send(data), self._loop)
         try:
             fut.result(timeout=timeout)
@@ -403,7 +423,9 @@ class TVClient:
         for _ in range(2):
             future = self._loop.create_future()
             self._pending[REGISTER_ID] = future
-            await self.websocket.send(json.dumps(self._build_register_msg()))
+            reg_msg = json.dumps(self._build_register_msg())
+            _log_send(reg_msg)
+            await self.websocket.send(reg_msg)
             try:
                 msg = await asyncio.wait_for(asyncio.shield(future), timeout=REGISTER_TIMEOUT)
             except asyncio.TimeoutError:
@@ -411,9 +433,15 @@ class TVClient:
                 return None
 
             if msg.get("type") == "error":
-                code = (msg.get("error") or {}).get("code")
+                err = msg.get("error")
+                if isinstance(err, dict):
+                    code = err.get("code")
+                elif isinstance(err, str):
+                    code = err.split()[0] if err else None
+                else:
+                    code = None
                 logger.warning("Регистрация отклонена: %s", msg)
-                if code == 401 and os.path.exists(self.client_key_file):
+                if str(code) == "401" and os.path.exists(self.client_key_file):
                     # Сохранённый ключ устарел/недействителен — сбрасываем и
                     # регистрируемся заново с manifest (pairing PROMPT).
                     try:
@@ -449,6 +477,7 @@ class TVClient:
         future = self._loop.create_future()
         self._pending[msg_id] = future
         msg = {"type": "request", "id": msg_id, "uri": uri, "payload": payload}
+        _log_send(json.dumps(msg))
         await self.websocket.send(json.dumps(msg))
         return await future
 
@@ -491,6 +520,7 @@ class TVClient:
     async def _listen(self) -> None:
         try:
             async for raw in self.websocket:
+                _log_recv(raw)
                 try:
                     msg = json.loads(raw)
                 except (json.JSONDecodeError, TypeError):
