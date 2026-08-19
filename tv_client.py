@@ -74,67 +74,75 @@ SIGNATURE = (
     "oa7NQnAtw=="
 )
 
-# Манифест из pywebostv: права CONTROL_MOUSE_AND_KEYBOARD / CONTROL_INPUT_TEXT /
-# CONTROL_INPUT_JOYSTICK в signed.permissions дают доступ к сервису
-# com.webos.service.networkinput (pointer / input-сокет).
+# Манифест для регистрации на LG webOS TV.
+# CONTROL_MOUSE_AND_KEYBOARD в обоих массивах (permissions + signed.permissions)
+# обязателен для getPointerInputSocket — без него TV отвечает 401.
 MANIFEST = {
-    "manifestVersion": 1,
+    "manifestVersion": 2,
     "appVersion": "1.1",
     "permissions": [
-        "LAUNCH",
-        "READ_INSTALLED_APPS",
-        "READ_TV_CURRENT_TIME",
+        "CONTROL_MOUSE_AND_KEYBOARD",
+        "CONTROL_INPUT_JOYSTICK",
+        "CONTROL_INPUT_TEXT",
+        "CONTROL_POWER",
+        "CONTROL_TV_POWER",
+        "CONTROL_AUDIO",
+        "CONTROL_DISPLAY",
+        "CONTROL_TV_SCREEN",
+        "CONTROL_TV_STANBY",
+        "CONTROL_RECORDING",
+        "CONTROL_BLUETOOTH",
+        "CONTROL_TIMER_INFO",
+        "CONTROL_FAVORITE_GROUP",
+        "CONTROL_USER_INFO",
+        "CONTROL_BOX_CHANNEL",
+        "CONTROL_CHANNEL_GROUP",
+        "CONTROL_CHANNEL_BLOCK",
         "LAUNCH",
         "LAUNCH_WEBAPP",
         "APP_TO_APP",
         "CLOSE",
         "TEST_OPEN",
         "TEST_PROTECTED",
-        "CONTROL_AUDIO",
-        "CONTROL_DISPLAY",
-        "CONTROL_INPUT_JOYSTICK",
-        "CONTROL_INPUT_MEDIA_RECORDING",
-        "CONTROL_INPUT_MEDIA_PLAYBACK",
-        "CONTROL_INPUT_TV",
-        "CONTROL_POWER",
+        "TEST_SECURE",
+        "READ_INSTALLED_APPS",
+        "READ_RUNNING_APPS",
         "READ_APP_STATUS",
         "READ_CURRENT_CHANNEL",
         "READ_INPUT_DEVICE_LIST",
         "READ_NETWORK_STATE",
-        "READ_RUNNING_APPS",
         "READ_TV_CHANNEL_LIST",
-        "WRITE_NOTIFICATION_TOAST",
+        "READ_TV_PROGRAM_INFO",
+        "READ_TV_CURRENT_TIME",
+        "READ_TV_ACR_AUTH_TOKEN",
+        "READ_TV_CONTENT_STATE",
         "READ_POWER_STATE",
         "READ_COUNTRY_INFO",
         "READ_SETTINGS",
-        "CONTROL_TV_SCREEN",
-        "CONTROL_TV_STANBY",
-        "CONTROL_FAVORITE_GROUP",
-        "CONTROL_USER_INFO",
-        "CHECK_BLUETOOTH_DEVICE",
-        "CONTROL_BLUETOOTH",
-        "CONTROL_TIMER_INFO",
-        "STB_INTERNAL_CONNECTION",
-        "CONTROL_RECORDING",
         "READ_RECORDING_STATE",
-        "WRITE_RECORDING_LIST",
         "READ_RECORDING_LIST",
         "READ_RECORDING_SCHEDULE",
-        "WRITE_RECORDING_SCHEDULE",
         "READ_STORAGE_DEVICE_LIST",
-        "READ_TV_PROGRAM_INFO",
-        "CONTROL_BOX_CHANNEL",
-        "READ_TV_ACR_AUTH_TOKEN",
-        "READ_TV_CONTENT_STATE",
-        "READ_TV_CURRENT_TIME",
+        "READ_UPDATE_INFO",
+        "READ_NOTIFICATIONS",
+        "READ_LGE_SDX",
+        "READ_LGE_TV_INPUT_EVENTS",
+        "WRITE_NOTIFICATION_TOAST",
+        "WRITE_NOTIFICATION_ALERT",
+        "WRITE_SETTINGS",
+        "WRITE_RECORDING_LIST",
+        "WRITE_RECORDING_SCHEDULE",
         "ADD_LAUNCHER_CHANNEL",
         "SET_CHANNEL_SKIP",
         "RELEASE_CHANNEL_SKIP",
-        "CONTROL_CHANNEL_BLOCK",
         "DELETE_SELECT_CHANNEL",
-        "CONTROL_CHANNEL_GROUP",
         "SCAN_TV_CHANNELS",
-        "CONTROL_TV_POWER",
+        "STB_INTERNAL_CONNECTION",
+        "SEARCH",
+        "UPDATE_FROM_REMOTE_APP",
+        "CONTROL_INPUT_MEDIA_RECORDING",
+        "CONTROL_INPUT_MEDIA_PLAYBACK",
+        "CHECK_BLUETOOTH_DEVICE",
         "CONTROL_WOL",
     ],
     "signatures": [{"signature": SIGNATURE, "signatureVersion": 1}],
@@ -149,19 +157,66 @@ MANIFEST = {
             "TEST_SECURE",
             "CONTROL_INPUT_TEXT",
             "CONTROL_MOUSE_AND_KEYBOARD",
-            "READ_INSTALLED_APPS",
-            "READ_LGE_SDX",
-            "READ_NOTIFICATIONS",
-            "SEARCH",
-            "WRITE_SETTINGS",
-            "WRITE_NOTIFICATION_ALERT",
+            "CONTROL_INPUT_JOYSTICK",
             "CONTROL_POWER",
-            "READ_CURRENT_CHANNEL",
+            "CONTROL_TV_POWER",
+            "CONTROL_AUDIO",
+            "CONTROL_DISPLAY",
+            "CONTROL_TV_SCREEN",
+            "CONTROL_TV_STANBY",
+            "CONTROL_RECORDING",
+            "CONTROL_BLUETOOTH",
+            "CONTROL_TIMER_INFO",
+            "CONTROL_FAVORITE_GROUP",
+            "CONTROL_USER_INFO",
+            "CONTROL_BOX_CHANNEL",
+            "CONTROL_CHANNEL_GROUP",
+            "CONTROL_CHANNEL_BLOCK",
+            "LAUNCH",
+            "LAUNCH_WEBAPP",
+            "APP_TO_APP",
+            "CLOSE",
+            "TEST_OPEN",
+            "TEST_PROTECTED",
+            "READ_INSTALLED_APPS",
             "READ_RUNNING_APPS",
-            "READ_UPDATE_INFO",
-            "UPDATE_FROM_REMOTE_APP",
-            "READ_LGE_TV_INPUT_EVENTS",
+            "READ_APP_STATUS",
+            "READ_CURRENT_CHANNEL",
+            "READ_INPUT_DEVICE_LIST",
+            "READ_NETWORK_STATE",
+            "READ_TV_CHANNEL_LIST",
+            "READ_TV_PROGRAM_INFO",
             "READ_TV_CURRENT_TIME",
+            "READ_TV_ACR_AUTH_TOKEN",
+            "READ_TV_CONTENT_STATE",
+            "READ_POWER_STATE",
+            "READ_COUNTRY_INFO",
+            "READ_SETTINGS",
+            "READ_RECORDING_STATE",
+            "READ_RECORDING_LIST",
+            "READ_RECORDING_SCHEDULE",
+            "READ_STORAGE_DEVICE_LIST",
+            "READ_UPDATE_INFO",
+            "READ_NOTIFICATIONS",
+            "READ_LGE_SDX",
+            "READ_LGE_TV_INPUT_EVENTS",
+            "WRITE_NOTIFICATION_TOAST",
+            "WRITE_NOTIFICATION_ALERT",
+            "WRITE_SETTINGS",
+            "WRITE_RECORDING_LIST",
+            "WRITE_RECORDING_SCHEDULE",
+            "ADD_LAUNCHER_CHANNEL",
+            "SET_CHANNEL_SKIP",
+            "RELEASE_CHANNEL_SKIP",
+            "DELETE_SELECT_CHANNEL",
+            "SCAN_TV_CHANNELS",
+            "STB_INTERNAL_CONNECTION",
+            "SEARCH",
+            "UPDATE_FROM_REMOTE_APP",
+            "CONTROL_INPUT_MEDIA_RECORDING",
+            "CONTROL_INPUT_MEDIA_PLAYBACK",
+            "CHECK_BLUETOOTH_DEVICE",
+            "CONTROL_WOL",
         ],
     },
 }
@@ -534,6 +589,31 @@ class TVClient:
         # 1) Canonical way: ask the TV for the socket path.
         try:
             reply = await self._request_async(POINTER_SOCKET_URI, {})
+
+            # Check for 401 — permissions are bound to the client-key at
+            # pairing time.  If the old key was registered with a manifest
+            # that lacked CONTROL_MOUSE_AND_KEYBOARD, we must re-register.
+            err = reply.get("error")
+            err_str = ""
+            if isinstance(err, dict):
+                err_str = str(err.get("message") or err.get("code") or "")
+            elif isinstance(err, str):
+                err_str = err
+            if reply.get("type") == "error" and "401" in err_str:
+                logger.warning("Pointer socket 401 — перерегистрация с обновлённым манифестом")
+                if os.path.exists(self.client_key_file):
+                    try:
+                        os.remove(self.client_key_file)
+                    except OSError:
+                        pass
+                self.paired = False
+                await self._register()
+                if not self.paired:
+                    logger.warning("Перерегистрация не удалась — pointer socket недоступен")
+                    return False
+                # Retry after re-registration.
+                reply = await self._request_async(POINTER_SOCKET_URI, {})
+
             path = (reply.get("payload") or {}).get("socketPath", "")
             if path:
                 url = urlparse(path if "://" in path else f"ws://{path}")
