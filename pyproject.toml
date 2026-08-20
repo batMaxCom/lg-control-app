@@ -1,12 +1,52 @@
 [project]
-name = "flet-app"
+name = "lg-remote"
 version = "0.1.0"
 description = "LG webOS remote control with a mobile-first Flet UI"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "flet[all]>=0.86.5",
+    "flet>=0.86.5",
     "requests",
     "websockets>=15.0",
     "python-dotenv>=1.0",
 ]
+
+[tool.flet]
+product = "LG Remote"
+
+[tool.flet.android]
+adaptive_icon_background = "#080B16"
+target_arch = ["arm64-v8a"]
+split_per_abi = false
+
+[tool.flet.app]
+exclude = [
+    ".venv",
+    ".venv-mobile",
+    ".git",
+    ".idea",
+    ".vscode",
+    "__pycache__",
+    "tests",
+    ".flet",
+    ".env.example",
+    ".gitignore",
+    "README.md"
+]
+
+[tool.flet.splash]
+color = "#080B16"
+dark_color = "#080B16"
+android = true
+
+[tool.flet.boot_screen.flet]
+theme_mode = "dark"
+
+bgcolor_dark = "#080B16"
+
+spinner_size = 0
+
+prepare_message = ""
+startup_message = "Developed by batMaxCom"
+
+fade_out_duration = 300
