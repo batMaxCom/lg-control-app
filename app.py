@@ -80,6 +80,8 @@ class LGRemoteApp:
         self._last_connection_snapshot: tuple[Any, ...] | None = None
         self._discovered_tvs_raw = discovered_tvs_json
         self._tv_keys_raw = tv_keys_json
+        self._discovery_cancel: asyncio.Event | None = None
+        self._discovery_loop: asyncio.AbstractEventLoop | None = None
 
         self.header_host = ft.Container()
         self.tabs_host = ft.Container()
@@ -107,6 +109,18 @@ class LGRemoteApp:
 
         self.state.discovered_tvs = self._load_discovered_tvs()
         self.state.tv_keys = self._load_tv_keys()
+
+        # Restore last successful TV connection if manual IP is empty.
+        if not self.state.tv_ip:
+            for saved_tv in self.state.discovered_tvs:
+                if saved_tv.get("ip") == self.state.last_tv_ip:
+                    self.state.tv_ip = saved_tv.get("ip", "")
+                    self.state.tv_port = int(saved_tv.get("port", 3000))
+                    self.state.tv_mac = saved_tv.get("mac", "")
+                    break
+
+        # Refresh SSDP cache on startup. Saved TVs remain available offline.
+        self.page.run_thread(self._discover_tvs_worker, True)
 
         self.page.on_disconnect = self._on_disconnect
         self.page.add(self._build_root())
@@ -332,11 +346,26 @@ class LGRemoteApp:
                         self.page.run_thread(self._load_section_data, self.state.active_section)
             await asyncio.sleep(0.55)
 
-    def _connect_worker(self) -> None:
-        if not self.state.tv_ip:
+    def _connect_worker(
+        self,
+        _e: ft.Event | None = None,
+        *,
+        ip: str | None = None,
+        port: int | None = None,
+        mac: str | None = None,
+    ) -> None:
+        connect_ip = ip if ip is not None else self.state.tv_ip
+        connect_port = port if port is not None else self.state.tv_port
+
+        if not connect_ip:
             self.state.connection_stage = "not_configured"
             self.refresh_view()
             return
+
+        self.state.tv_ip = connect_ip
+        self.state.tv_port = connect_port
+        if mac is not None:
+            self.state.tv_mac = mac
 
         self.state.connection_stage = "connecting"
         self.refresh_view()
@@ -344,8 +373,8 @@ class LGRemoteApp:
         if self.client is not None:
             self.client.close()
 
-        tv_key = self.state.tv_keys.get(self.state.tv_ip, "")
-        self.client = TVClient(ip=self.state.tv_ip, port=self.state.tv_port, client_key=tv_key)
+        tv_key = self.state.tv_keys.get(connect_ip, "")
+        self.client = TVClient(ip=connect_ip, port=connect_port, client_key=tv_key)
 
         ok = self.client.connect(timeout=18)
         if not ok:
@@ -357,13 +386,13 @@ class LGRemoteApp:
         if self.client.paired:
             self.state.connection_stage = "connected"
             self._connect_pointer_worker()
-            self.state.add_activity("Подключение", True, self.state.tv_ip)
+            self.state.add_activity("Подключение", True, connect_ip)
             new_key = self.client.client_key
             if new_key:
-                self.state.tv_keys[self.state.tv_ip] = new_key
+                self.state.tv_keys[connect_ip] = new_key
                 self._save_tv_keys()
             import asyncio as _aio
-            _aio.run(self.prefs.set("lg_remote.last_tv_ip", self.state.tv_ip))
+            _aio.run(self.prefs.set("lg_remote.last_tv_ip", connect_ip))
             self._load_section_data(self.state.active_section)
         else:
             self.state.connection_stage = "pairing"
@@ -2018,10 +2047,12 @@ class LGRemoteApp:
             await self.prefs.set("lg_remote.tv_port", port_value)
             await self.prefs.set("lg_remote.tv_mac", mac_value)
 
-            self.state.tv_ip = host
-            self.state.tv_port = port_value
-            self.state.tv_mac = mac_value
-            self.page.run_thread(self._connect_worker)
+            self.page.run_thread(
+                self._connect_worker,
+                ip=host,
+                port=port_value,
+                mac=mac_value or None,
+            )
 
         discovered_column = ft.Column(spacing=6)
         if self.state.discovered_tvs:
@@ -2061,18 +2092,83 @@ class LGRemoteApp:
         return ft.Column(
             spacing=14,
             controls=[
-                section_title("Поиск телевизоров", "Автоматическое обнаружение LG webOS TV"),
+                section_title(
+                    "Телевизоры",
+                    "Автопоиск LG webOS TV в локальной сети"
+                ),
                 glass_panel(
                     ft.Column(
-                        spacing=10,
+                        spacing=12,
                         controls=[
-                            pill_button(
-                                "Найти телевизоры",
-                                icon=ft.Icons.SEARCH,
-                                active=True,
-                                on_click=self._discover_tvs,
-                                disabled=self.state.discovery_in_progress,
+                            ft.Row(
+                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                controls=[
+                                    ft.Text(
+                                        "Поиск устройств",
+                                        size=16,
+                                        weight=ft.FontWeight.W_600,
+                                        color=C.TEXT,
+                                    ),
+                                    ft.Icon(
+                                        ft.Icons.WIFI_FIND,
+                                        color=C.CYAN,
+                                        size=24,
+                                    ),
+                                ],
                             ),
+                            ft.Row(
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                controls=[
+                                    ft.ElevatedButton(
+                                        content=ft.Row(
+                                            alignment=ft.MainAxisAlignment.CENTER,
+                                            controls=[
+                                                ft.Icon(ft.Icons.SEARCH),
+                                                ft.Text("Найти телевизоры"),
+                                            ],
+                                        ),
+                                        height=52,
+                                        style=ft.ButtonStyle(
+                                            bgcolor=C.CYAN,
+                                            color=C.BG,
+                                            shape=ft.RoundedRectangleBorder(radius=18),
+                                        ),
+                                        on_click=self._discover_tvs_with_progress,
+                                        disabled=False,
+                                    ),
+                                    ft.IconButton(
+                                        icon=ft.Icons.CANCEL,
+                                        icon_color=C.RED,
+                                        icon_size=28,
+                                        visible=self.state.discovery_in_progress,
+                                        on_click=lambda _e: self._cancel_discovery(),
+                                        tooltip="Отменить поиск",
+                                    ),
+                                ],
+                            ),
+                            ft.Row(
+                                visible=self.state.discovery_in_progress,
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                controls=[
+                                    ft.ProgressRing(
+                                        width=20,
+                                        height=20,
+                                        stroke_width=2,
+                                        color=C.CYAN,
+                                    ),
+                                    ft.Text(
+                                        "Поиск телевизоров в сети...",
+                                        color=C.TEXT_2,
+                                        size=13,
+                                    ),
+                                ],
+                            ),
+                            ft.Text(
+                                "Нажмите для ручного запуска SSDP-поиска",
+                                size=12,
+                                color=C.TEXT_3,
+                            ),
+
                             discovered_column,
                         ],
                     )
@@ -2099,31 +2195,113 @@ class LGRemoteApp:
                 ),
                 pill_button("Переподключиться", icon=ft.Icons.REFRESH, on_click=self._reconnect),
                 pill_button("Включить через Wake-on-LAN", icon=ft.Icons.POWER_SETTINGS_NEW, icon_color=C.CYAN, on_click=self._wake_tv, disabled=not bool(self.state.tv_mac)),
+                ft.Container(height=8),
+                ft.ElevatedButton(
+                    content=ft.Row(
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        controls=[
+                            ft.Icon(ft.Icons.DELETE_SWEEP),
+                            ft.Text("Сбросить все подключения"),
+                        ],
+                    ),
+                    height=52,
+                    style=ft.ButtonStyle(
+                        bgcolor="#332B1820",
+                        color=C.RED,
+                        shape=ft.RoundedRectangleBorder(radius=18),
+                    ),
+                    on_click=self._reset_all_connections,
+                ),
             ],
         )
 
-    def _discover_tvs(self, _e: ft.Event) -> None:
-        self.page.run_thread(self._discover_tvs_worker)
+    def _discover_tvs_with_progress(self, _e: ft.Event) -> None:
+        """Manual discovery entry point — cancel any running search and start a new one."""
+        print("[DISCOVER] Кнопка 'Найти телевизоры' нажата")
 
-    def _discover_tvs_worker(self) -> None:
-        self.state.discovery_in_progress = True
-        self.state.add_activity("Поиск телевизоров", True, "Запуск SSDP обнаружения...")
-        self.refresh_view()
+        if self.state.discovery_in_progress:
+            print("[DISCOVER] Отмена предыдущего поиска")
+            self._cancel_discovery()
+
         try:
-            import asyncio as _asyncio
+            self.state.add_activity(
+                "Запущен ручной поиск телевизоров",
+                True,
+            )
+        except Exception:
+            pass
+
+        print("[DISCOVER] Запуск worker-потока для SSDP-поиска")
+        self.refresh_view()
+        self.page.run_thread(self._discover_tvs_worker, False)
+
+    def _cancel_discovery(self) -> None:
+        """Signal the running discovery worker to stop."""
+        if self._discovery_cancel is not None and self._discovery_loop is not None:
+            self._discovery_loop.call_soon_threadsafe(self._discovery_cancel.set)
+
+    def _discover_tvs_worker(self, silent: bool = False) -> None:
+        print("[DISCOVER] Worker запущен, silent =", silent)
+        self.state.discovery_in_progress = True
+        if not silent:
+            self.state.add_activity("Поиск телевизоров", True, "Запуск SSDP обнаружения...")
+        self.refresh_view()
+
+        cancel = asyncio.Event()
+        loop = asyncio.new_event_loop()
+        self._discovery_cancel = cancel
+        self._discovery_loop = loop
+
+        try:
             from ssdp_discovery import discover_lg_tvs
-            tvs = _asyncio.run(discover_lg_tvs(timeout=4))
-            self.state.discovered_tvs = tvs
-            self._save_discovered_tvs(tvs)
-            if tvs:
-                self.state.add_activity("Поиск телевизоров", True, f"Найдено: {len(tvs)}")
+
+            def _on_tv_found(tv: dict[str, str]) -> None:
+                self.state.discovered_tvs = self._merge_discovered_tvs([tv])
+                print(f"[DISCOVER] Найден ТВ: {tv.get('name')} ({tv.get('ip')}), обновление UI")
+                self.refresh_view()
+
+            print("[DISCOVER] Запуск discover_lg_tvs(timeout=5)")
+            tvs = loop.run_until_complete(
+                discover_lg_tvs(timeout=5, on_found=_on_tv_found, cancel_event=cancel)
+            )
+            if cancel.is_set():
+                print("[DISCOVER] Поиск был отменён")
             else:
-                self.state.add_activity("Поиск телевизоров", False, "Телевизоры не найдены")
+                print(f"[DISCOVER] SSDP вернул {len(tvs)} телевизоров: {tvs}")
+                self.state.discovered_tvs = self._merge_discovered_tvs(tvs)
+                self._save_discovered_tvs(self.state.discovered_tvs)
+                if tvs:
+                    self.state.add_activity("Поиск телевизоров", True, f"Найдено: {len(tvs)}")
+                else:
+                    self.state.add_activity("Поиск телевизоров", False, "Телевизоры не найдены")
         except Exception as exc:
+            print(f"[DISCOVER] ОШИБКА в worker: {exc}")
+            import traceback
+            traceback.print_exc()
             self.state.add_activity("Поиск телевизоров", False, str(exc))
         finally:
+            print(f"[DISCOVER] Worker завершён. Итого найдено: {len(self.state.discovered_tvs)}")
             self.state.discovery_in_progress = False
+            self._discovery_cancel = None
+            self._discovery_loop = None
+            loop.close()
+            try:
+                self.state.add_activity(
+                    f"Поиск телевизоров завершён. Найдено: {len(self.state.discovered_tvs)}",
+                    True,
+                )
+            except Exception:
+                pass
             self.refresh_view()
+
+    def _merge_discovered_tvs(self, fresh: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Merge SSDP results without losing saved metadata."""
+        merged: dict[str, dict[str, str]] = {}
+        for item in [*self.state.discovered_tvs, *fresh]:
+            ip = item.get("ip")
+            if ip:
+                merged[ip] = {**merged.get(ip, {}), **item}
+        return list(merged.values())
 
     def _save_discovered_tvs(self, tvs: list[dict[str, str]]) -> None:
         import json as _json
@@ -2168,39 +2346,109 @@ class LGRemoteApp:
         return {}
 
     def _select_discovered_tv(self, tv_ip: str) -> None:
-        self.state.tv_ip = tv_ip
+        if tv_ip == self.state.tv_ip and self.client and self.client.connected:
+            return
         self.page.run_thread(self._select_discovered_tv_worker, tv_ip)
 
     def _select_discovered_tv_worker(self, tv_ip: str) -> None:
-        import asyncio as _aio
-        _aio.run(self.prefs.set("lg_remote.tv_ip", tv_ip))
-        _aio.run(self.prefs.set("lg_remote.last_tv_ip", tv_ip))
-        self._connect_worker()
+        if self.client is not None:
+            self.client.close()
+        selected = next(
+            (tv for tv in self.state.discovered_tvs if tv.get("ip") == tv_ip),
+            None,
+        )
+
+        connect_port = int(selected.get("port", self.state.tv_port or 3000)) if selected else self.state.tv_port
+        connect_mac = selected.get("mac", "") if selected else ""
+
+        self.state.connection_stage = "connecting"
+        self.state.pointer_connected = False
+        self.refresh_view()
+        self._connect_worker(ip=tv_ip, port=connect_port, mac=connect_mac or None)
 
     def _remove_discovered_tv(self, tv_ip: str) -> None:
         self.page.run_thread(self._remove_discovered_tv_worker, tv_ip)
 
     def _remove_discovered_tv_worker(self, tv_ip: str) -> None:
         import asyncio as _aio
+        import json as _json
+
         was_current = tv_ip == self.state.tv_ip
+
         if was_current and self.client is not None:
             self.client.close()
             self.client.forget_client_key()
             self.client = None
-        self.state.discovered_tvs = [tv for tv in self.state.discovered_tvs if tv.get("ip") != tv_ip]
-        _aio.run(self.prefs.set("lg_remote.discovered_tvs", __import__('json').dumps(self.state.discovered_tvs)))
+
+        # Remove TV from discovery cache.
+        self.state.discovered_tvs = [
+            tv for tv in self.state.discovered_tvs if tv.get("ip") != tv_ip
+        ]
+        await_set = [
+            ("lg_remote.discovered_tvs", _json.dumps(self.state.discovered_tvs)),
+        ]
+
+        # Remove saved pairing key.
         if tv_ip in self.state.tv_keys:
             del self.state.tv_keys[tv_ip]
-            _aio.run(self.prefs.set("lg_remote.tv_keys", __import__('json').dumps(self.state.tv_keys)))
+        await_set.append(("lg_remote.tv_keys", _json.dumps(self.state.tv_keys)))
+
         if was_current:
+            # Clear all connection data, including manual connection fields.
             self.state.tv_ip = ""
-            self.state.tv_port = 3000
             self.state.tv_mac = ""
+            self.state.tv_port = 3000
             self.state.connection_stage = "not_configured"
             self.state.pointer_connected = False
-            _aio.run(self.prefs.set("lg_remote.tv_ip", ""))
-            _aio.run(self.prefs.set("lg_remote.tv_port", 3000))
-            _aio.run(self.prefs.set("lg_remote.tv_mac", ""))
+            await_set.extend([
+                ("lg_remote.tv_ip", ""),
+                ("lg_remote.last_tv_ip", ""),
+                ("lg_remote.tv_mac", ""),
+                ("lg_remote.tv_port", 3000),
+                ("lg_remote.discovered_tvs", json.dumps(
+                    self.state.discovered_tvs
+                )),
+            ])
+
+        for key, value in await_set:
+            _aio.run(self.prefs.set(key, value))
+
         self.state.add_activity("Удаление ТВ", True, tv_ip)
+        self.refresh_view()
+
+
+    async def _reset_all_connections(self, e):
+        """Full reset: remove saved TVs, keys and disable restoring deleted devices."""
+        import json as _json
+
+        try:
+            if self.client:
+                self.client.close()
+                self.client = None
+        except Exception:
+            pass
+
+        self.state.discovered_tvs = []
+        self.state.tv_keys = {}
+        self.state.tv_ip = ""
+        self.state.tv_mac = ""
+        self.state.tv_port = 3000
+        self.state.last_tv_ip = ""
+        self.state.connection_stage = "not_configured"
+        self.state.pointer_connected = False
+
+        values = {
+            "lg_remote.tv_ip": "",
+            "lg_remote.last_tv_ip": "",
+            "lg_remote.tv_mac": "",
+            "lg_remote.tv_port": 3000,
+            "lg_remote.tv_keys": _json.dumps({}),
+            "lg_remote.discovered_tvs": _json.dumps([]),
+        }
+
+        for key, value in values.items():
+            await self.prefs.set(key, value)
+
+        self.state.add_activity("Сброс подключений", True)
         self.refresh_view()
 

@@ -6,7 +6,9 @@ from all LG webOS TVs on the local network within the timeout window.
 
 import asyncio
 import logging
+import select
 import socket
+from collections.abc import Callable
 from urllib.parse import urlparse
 
 logger = logging.getLogger("ssdp_discovery")
@@ -26,13 +28,19 @@ LG_SEARCH = (
 MSEARCH_TIMEOUT = 5
 
 
-async def discover_lg_tvs(timeout: float = MSEARCH_TIMEOUT) -> list[dict[str, str]]:
+async def discover_lg_tvs(
+    timeout: float = MSEARCH_TIMEOUT,
+    on_found: Callable[[dict[str, str]], None] | None = None,
+    cancel_event: asyncio.Event | None = None,
+) -> list[dict[str, str]]:
     """Discover LG webOS TVs on the local network via SSDP.
 
     Returns a list of dicts with keys: ip, name, usn, location.
+    If *on_found* is provided it is called for each new TV as soon as it
+    is discovered, allowing the caller to update the UI incrementally.
+    If *cancel_event* is provided, the search stops early when it is set.
     """
     found: dict[str, dict[str, str]] = {}
-    loop = asyncio.get_running_loop()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -44,16 +52,21 @@ async def discover_lg_tvs(timeout: float = MSEARCH_TIMEOUT) -> list[dict[str, st
 
         deadline = asyncio.get_event_loop().time() + timeout
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("SSDP search cancelled")
+                break
+
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
                 break
 
+            ready, _, _ = select.select([sock], [], [], min(remaining, 0.5))
+            if not ready:
+                continue
+
             try:
-                data, addr = await asyncio.wait_for(
-                    loop.sock_recvfrom(sock, 2048),
-                    timeout=min(remaining, 0.5),
-                )
-            except (asyncio.TimeoutError, TimeoutError):
+                data, addr = sock.recvfrom(2048)
+            except (BlockingIOError, OSError):
                 continue
 
             ip = addr[0]
@@ -94,6 +107,8 @@ async def discover_lg_tvs(timeout: float = MSEARCH_TIMEOUT) -> list[dict[str, st
                 "st": st,
             }
             logger.info("Found LG TV: %s at %s", name, ip)
+            if on_found is not None:
+                on_found(found[ip])
 
     except Exception as exc:
         logger.warning("SSDP search error: %s", exc)
