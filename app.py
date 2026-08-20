@@ -2054,125 +2054,10 @@ class LGRemoteApp:
                 mac=mac_value or None,
             )
 
-        discovered_column = ft.Column(spacing=6)
-        if self.state.discovered_tvs:
-            for tv in self.state.discovered_tvs:
-                tv_ip_val = tv["ip"]
-                tv_name = tv.get("name", tv_ip_val)
-                is_current = tv_ip_val == self.state.tv_ip
-                discovered_column.controls.append(
-                    ft.Row(
-                        controls=[
-                            ft.Container(
-                                content=pill_button(
-                                    f"{tv_name} ({tv_ip_val})",
-                                    icon=ft.Icons.TV if not is_current else ft.Icons.CHECK_CIRCLE,
-                                    active=is_current,
-                                    on_click=lambda _e, t=tv_ip_val: self._select_discovered_tv(t),
-                                ),
-                                expand=True,
-                            ),
-                            ft.IconButton(
-                                icon=ft.Icons.CLOSE,
-                                icon_color=C.RED,
-                                icon_size=18,
-                                on_click=lambda _e, t=tv_ip_val: self._remove_discovered_tv(t),
-                                tooltip="Удалить",
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    )
-                )
-        else:
-            discovered_column.controls.append(
-                ft.Text("Нет найденных телевизоров", size=12, color=C.TEXT_3)
-            )
-
         return ft.Column(
             spacing=14,
             controls=[
-                section_title(
-                    "Телевизоры",
-                    "Автопоиск LG webOS TV в локальной сети"
-                ),
-                glass_panel(
-                    ft.Column(
-                        spacing=12,
-                        controls=[
-                            ft.Row(
-                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                                controls=[
-                                    ft.Text(
-                                        "Поиск устройств",
-                                        size=16,
-                                        weight=ft.FontWeight.W_600,
-                                        color=C.TEXT,
-                                    ),
-                                    ft.Icon(
-                                        ft.Icons.WIFI_FIND,
-                                        color=C.CYAN,
-                                        size=24,
-                                    ),
-                                ],
-                            ),
-                            ft.Row(
-                                alignment=ft.MainAxisAlignment.CENTER,
-                                controls=[
-                                    ft.ElevatedButton(
-                                        content=ft.Row(
-                                            alignment=ft.MainAxisAlignment.CENTER,
-                                            controls=[
-                                                ft.Icon(ft.Icons.SEARCH),
-                                                ft.Text("Найти телевизоры"),
-                                            ],
-                                        ),
-                                        height=52,
-                                        style=ft.ButtonStyle(
-                                            bgcolor=C.CYAN,
-                                            color=C.BG,
-                                            shape=ft.RoundedRectangleBorder(radius=18),
-                                        ),
-                                        on_click=self._discover_tvs_with_progress,
-                                        disabled=False,
-                                    ),
-                                    ft.IconButton(
-                                        icon=ft.Icons.CANCEL,
-                                        icon_color=C.RED,
-                                        icon_size=28,
-                                        visible=self.state.discovery_in_progress,
-                                        on_click=lambda _e: self._cancel_discovery(),
-                                        tooltip="Отменить поиск",
-                                    ),
-                                ],
-                            ),
-                            ft.Row(
-                                visible=self.state.discovery_in_progress,
-                                alignment=ft.MainAxisAlignment.CENTER,
-                                controls=[
-                                    ft.ProgressRing(
-                                        width=20,
-                                        height=20,
-                                        stroke_width=2,
-                                        color=C.CYAN,
-                                    ),
-                                    ft.Text(
-                                        "Поиск телевизоров в сети...",
-                                        color=C.TEXT_2,
-                                        size=13,
-                                    ),
-                                ],
-                            ),
-                            ft.Text(
-                                "Нажмите для ручного запуска SSDP-поиска",
-                                size=12,
-                                color=C.TEXT_3,
-                            ),
-
-                            discovered_column,
-                        ],
-                    )
-                ),
+                self._tv_list_section(),
                 section_title("Ручная настройка", "Введите IP адрес вручную"),
                 glass_panel(
                     ft.Column(
@@ -2215,6 +2100,78 @@ class LGRemoteApp:
             ],
         )
 
+    def _tv_list_section(self) -> ft.Control:
+        """Pull-to-refresh TV list. Pull down to start SSDP search."""
+        _pulled = [False]
+
+        def _on_scroll(e: ft.ScrollEvent) -> None:
+            if e.pixels < -80 and not _pulled[0]:
+                _pulled[0] = True
+                self._discover_tvs_with_progress(e)
+            if e.pixels >= 0:
+                _pulled[0] = False
+
+        tv_items: list[ft.Control] = []
+        if self.state.discovery_in_progress:
+            tv_items.append(
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    controls=[
+                        ft.ProgressRing(width=20, height=20, stroke_width=2, color=C.CYAN),
+                        ft.Text("Поиск телевизоров в сети...", color=C.TEXT_2, size=13),
+                    ],
+                )
+            )
+        elif self.state.discovered_tvs:
+            for tv in self.state.discovered_tvs:
+                tv_ip_val = tv["ip"]
+                tv_name = tv.get("name", tv_ip_val)
+                is_current = tv_ip_val == self.state.tv_ip
+                tv_items.append(
+                    ft.Row(
+                        controls=[
+                            ft.Container(
+                                content=pill_button(
+                                    f"{tv_name} ({tv_ip_val})",
+                                    icon=ft.Icons.TV if not is_current else ft.Icons.CHECK_CIRCLE,
+                                    active=is_current,
+                                    on_click=lambda _e, t=tv_ip_val: self._select_discovered_tv(t),
+                                ),
+                                expand=True,
+                            ),
+                            ft.IconButton(
+                                icon=ft.Icons.CLOSE,
+                                icon_color=C.RED,
+                                icon_size=18,
+                                on_click=lambda _e, t=tv_ip_val: self._remove_discovered_tv(t),
+                                tooltip="Удалить",
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    )
+                )
+        else:
+            tv_items.append(
+                ft.Text("Устройства не найдены", size=13, color=C.TEXT_3, text_align=ft.TextAlign.CENTER)
+            )
+
+        return glass_panel(
+            ft.Column(
+                spacing=6,
+                controls=[
+                    ft.Container(
+                        height=280,
+                        content=ft.ListView(
+                            on_scroll=_on_scroll,
+                            controls=tv_items,
+                            expand=True,
+                        ),
+                    ),
+                ],
+            )
+        )
+
     def _discover_tvs_with_progress(self, _e: ft.Event) -> None:
         """Manual discovery entry point — cancel any running search and start a new one."""
         print("[DISCOVER] Кнопка 'Найти телевизоры' нажата")
@@ -2252,6 +2209,11 @@ class LGRemoteApp:
         self._discovery_cancel = cancel
         self._discovery_loop = loop
 
+        import threading
+        auto_cancel = threading.Timer(5.0, self._cancel_discovery)
+        auto_cancel.daemon = True
+        auto_cancel.start()
+
         try:
             from ssdp_discovery import discover_lg_tvs
 
@@ -2280,6 +2242,7 @@ class LGRemoteApp:
             traceback.print_exc()
             self.state.add_activity("Поиск телевизоров", False, str(exc))
         finally:
+            auto_cancel.cancel()
             print(f"[DISCOVER] Worker завершён. Итого найдено: {len(self.state.discovered_tvs)}")
             self.state.discovery_in_progress = False
             self._discovery_cancel = None
