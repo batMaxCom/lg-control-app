@@ -12,6 +12,3 @@ wheels/
 
 # Other
 #static
-
-# Local server config
-#.env

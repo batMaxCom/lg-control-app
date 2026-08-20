@@ -47,6 +47,11 @@ class RemoteState:
 
     touch_mode: str = "move"
 
+    discovered_tvs: list[dict[str, str]] = field(default_factory=list)
+    last_tv_ip: str = ""
+    discovery_in_progress: bool = False
+    tv_keys: dict[str, str] = field(default_factory=dict)
+
     def add_activity(self, label: str, ok: bool, detail: str = "") -> None:
         self.activity.insert(
             0,

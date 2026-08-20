@@ -8,7 +8,6 @@ dependencies = [
     "flet>=0.86.5",
     "requests",
     "websockets>=15.0",
-    "python-dotenv>=1.0",
 ]
 
 [tool.flet]
@@ -18,6 +17,13 @@ product = "LG Remote"
 adaptive_icon_background = "#080B16"
 target_arch = ["arm64-v8a"]
 split_per_abi = false
+
+[tool.flet.android.permission]
+permissions = [
+    "android.permission.INTERNET",
+    "android.permission.ACCESS_NETWORK_STATE",
+    "android.permission.CHANGE_WIFI_MULTICAST_STATE",
+]
 
 [tool.flet.app]
 exclude = [
@@ -29,7 +35,6 @@ exclude = [
     "__pycache__",
     "tests",
     ".flet",
-    ".env.example",
     ".gitignore",
     "README.md"
 ]

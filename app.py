@@ -33,6 +33,7 @@ from components import (
 )
 from theme import C, S, active_gradient, border, glass_gradient, shadow
 from tv_client import TVClient, wake_on_lan
+from ssdp_discovery import discover_lg_tvs
 
 
 TAB_DEFS = [
@@ -68,6 +69,8 @@ class LGRemoteApp:
         tv_ip: str = "",
         tv_port: int = 3000,
         tv_mac: str = "",
+        discovered_tvs_json: str = "",
+        tv_keys_json: str = "",
     ) -> None:
         self.page = page
         self.prefs = prefs
@@ -75,6 +78,8 @@ class LGRemoteApp:
         self.client: TVClient | None = None
         self._monitor_running = True
         self._last_connection_snapshot: tuple[Any, ...] | None = None
+        self._discovered_tvs_raw = discovered_tvs_json
+        self._tv_keys_raw = tv_keys_json
 
         self.header_host = ft.Container()
         self.tabs_host = ft.Container()
@@ -99,6 +104,9 @@ class LGRemoteApp:
             self.page.window.min_height = 620
         except Exception:
             pass
+
+        self.state.discovered_tvs = self._load_discovered_tvs()
+        self.state.tv_keys = self._load_tv_keys()
 
         self.page.on_disconnect = self._on_disconnect
         self.page.add(self._build_root())
@@ -335,7 +343,9 @@ class LGRemoteApp:
 
         if self.client is not None:
             self.client.close()
-        self.client = TVClient(ip=self.state.tv_ip, port=self.state.tv_port)
+
+        tv_key = self.state.tv_keys.get(self.state.tv_ip, "")
+        self.client = TVClient(ip=self.state.tv_ip, port=self.state.tv_port, client_key=tv_key)
 
         ok = self.client.connect(timeout=18)
         if not ok:
@@ -348,9 +358,14 @@ class LGRemoteApp:
             self.state.connection_stage = "connected"
             self._connect_pointer_worker()
             self.state.add_activity("Подключение", True, self.state.tv_ip)
+            new_key = self.client.client_key
+            if new_key:
+                self.state.tv_keys[self.state.tv_ip] = new_key
+                self._save_tv_keys()
+            import asyncio as _aio
+            _aio.run(self.prefs.set("lg_remote.last_tv_ip", self.state.tv_ip))
             self._load_section_data(self.state.active_section)
         else:
-            # The socket stays open while the user confirms pairing on the TV.
             self.state.connection_stage = "pairing"
             self.state.add_activity("Сопряжение", True, "Ожидание подтверждения на ТВ")
         self.refresh_view()
@@ -2008,10 +2023,61 @@ class LGRemoteApp:
             self.state.tv_mac = mac_value
             self.page.run_thread(self._connect_worker)
 
+        discovered_column = ft.Column(spacing=6)
+        if self.state.discovered_tvs:
+            for tv in self.state.discovered_tvs:
+                tv_ip_val = tv["ip"]
+                tv_name = tv.get("name", tv_ip_val)
+                is_current = tv_ip_val == self.state.tv_ip
+                discovered_column.controls.append(
+                    ft.Row(
+                        controls=[
+                            ft.Container(
+                                content=pill_button(
+                                    f"{tv_name} ({tv_ip_val})",
+                                    icon=ft.Icons.TV if not is_current else ft.Icons.CHECK_CIRCLE,
+                                    active=is_current,
+                                    on_click=lambda _e, t=tv_ip_val: self._select_discovered_tv(t),
+                                ),
+                                expand=True,
+                            ),
+                            ft.IconButton(
+                                icon=ft.Icons.CLOSE,
+                                icon_color=C.RED,
+                                icon_size=18,
+                                on_click=lambda _e, t=tv_ip_val: self._remove_discovered_tv(t),
+                                tooltip="Удалить",
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    )
+                )
+        else:
+            discovered_column.controls.append(
+                ft.Text("Нет найденных телевизоров", size=12, color=C.TEXT_3)
+            )
+
         return ft.Column(
             spacing=14,
             controls=[
-                section_title("Подключение", "Настройки сохраняются на устройстве"),
+                section_title("Поиск телевизоров", "Автоматическое обнаружение LG webOS TV"),
+                glass_panel(
+                    ft.Column(
+                        spacing=10,
+                        controls=[
+                            pill_button(
+                                "Найти телевизоры",
+                                icon=ft.Icons.SEARCH,
+                                active=True,
+                                on_click=self._discover_tvs,
+                                disabled=self.state.discovery_in_progress,
+                            ),
+                            discovered_column,
+                        ],
+                    )
+                ),
+                section_title("Ручная настройка", "Введите IP адрес вручную"),
                 glass_panel(
                     ft.Column(
                         spacing=10,
@@ -2033,24 +2099,108 @@ class LGRemoteApp:
                 ),
                 pill_button("Переподключиться", icon=ft.Icons.REFRESH, on_click=self._reconnect),
                 pill_button("Включить через Wake-on-LAN", icon=ft.Icons.POWER_SETTINGS_NEW, icon_color=C.CYAN, on_click=self._wake_tv, disabled=not bool(self.state.tv_mac)),
-                pill_button("Сбросить сопряжение", icon=ft.Icons.LINK_OFF, icon_color=C.RED, on_click=self._forget_pairing),
-                ft.Text(
-                    "TV_IP/.env по-прежнему поддерживается как fallback для desktop-разработки; на мобильном удобнее сохранить адрес здесь.",
-                    size=10.5,
-                    color=C.TEXT_3,
-                ),
             ],
         )
 
-    def _forget_pairing(self, _e: ft.Event) -> None:
-        self.page.run_thread(self._forget_pairing_worker)
+    def _discover_tvs(self, _e: ft.Event) -> None:
+        self.page.run_thread(self._discover_tvs_worker)
 
-    def _forget_pairing_worker(self) -> None:
-        if self.client is None:
-            self.client = TVClient(ip=self.state.tv_ip or "127.0.0.1", port=self.state.tv_port)
-        self.client.close()
-        ok = self.client.forget_client_key()
-        self.state.add_activity("Сброс сопряжения", ok, "client-key удалён" if ok else "ошибка удаления")
-        self.state.connection_stage = "offline" if self.state.tv_ip else "not_configured"
+    def _discover_tvs_worker(self) -> None:
+        self.state.discovery_in_progress = True
+        self.state.add_activity("Поиск телевизоров", True, "Запуск SSDP обнаружения...")
+        self.refresh_view()
+        try:
+            import asyncio as _asyncio
+            from ssdp_discovery import discover_lg_tvs
+            tvs = _asyncio.run(discover_lg_tvs(timeout=4))
+            self.state.discovered_tvs = tvs
+            self._save_discovered_tvs(tvs)
+            if tvs:
+                self.state.add_activity("Поиск телевизоров", True, f"Найдено: {len(tvs)}")
+            else:
+                self.state.add_activity("Поиск телевизоров", False, "Телевизоры не найдены")
+        except Exception as exc:
+            self.state.add_activity("Поиск телевизоров", False, str(exc))
+        finally:
+            self.state.discovery_in_progress = False
+            self.refresh_view()
+
+    def _save_discovered_tvs(self, tvs: list[dict[str, str]]) -> None:
+        import json as _json
+        import concurrent.futures
+        try:
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                pool.submit(
+                    lambda: __import__('asyncio').run(self.prefs.set("lg_remote.discovered_tvs", _json.dumps(tvs)))
+                ).result(timeout=3)
+        except Exception:
+            pass
+
+    def _save_tv_keys(self) -> None:
+        import json as _json
+        import concurrent.futures
+        try:
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                pool.submit(
+                    lambda: __import__('asyncio').run(self.prefs.set("lg_remote.tv_keys", _json.dumps(self.state.tv_keys)))
+                ).result(timeout=3)
+        except Exception:
+            pass
+
+    def _load_discovered_tvs(self) -> list[dict[str, str]]:
+        import json as _json
+        try:
+            raw = self._discovered_tvs_raw
+            if raw:
+                return _json.loads(raw)
+        except Exception:
+            pass
+        return []
+
+    def _load_tv_keys(self) -> dict[str, str]:
+        import json as _json
+        try:
+            raw = self._tv_keys_raw
+            if raw:
+                return _json.loads(raw)
+        except Exception:
+            pass
+        return {}
+
+    def _select_discovered_tv(self, tv_ip: str) -> None:
+        self.state.tv_ip = tv_ip
+        self.page.run_thread(self._select_discovered_tv_worker, tv_ip)
+
+    def _select_discovered_tv_worker(self, tv_ip: str) -> None:
+        import asyncio as _aio
+        _aio.run(self.prefs.set("lg_remote.tv_ip", tv_ip))
+        _aio.run(self.prefs.set("lg_remote.last_tv_ip", tv_ip))
+        self._connect_worker()
+
+    def _remove_discovered_tv(self, tv_ip: str) -> None:
+        self.page.run_thread(self._remove_discovered_tv_worker, tv_ip)
+
+    def _remove_discovered_tv_worker(self, tv_ip: str) -> None:
+        import asyncio as _aio
+        was_current = tv_ip == self.state.tv_ip
+        if was_current and self.client is not None:
+            self.client.close()
+            self.client.forget_client_key()
+            self.client = None
+        self.state.discovered_tvs = [tv for tv in self.state.discovered_tvs if tv.get("ip") != tv_ip]
+        _aio.run(self.prefs.set("lg_remote.discovered_tvs", __import__('json').dumps(self.state.discovered_tvs)))
+        if tv_ip in self.state.tv_keys:
+            del self.state.tv_keys[tv_ip]
+            _aio.run(self.prefs.set("lg_remote.tv_keys", __import__('json').dumps(self.state.tv_keys)))
+        if was_current:
+            self.state.tv_ip = ""
+            self.state.tv_port = 3000
+            self.state.tv_mac = ""
+            self.state.connection_stage = "not_configured"
+            self.state.pointer_connected = False
+            _aio.run(self.prefs.set("lg_remote.tv_ip", ""))
+            _aio.run(self.prefs.set("lg_remote.tv_port", 3000))
+            _aio.run(self.prefs.set("lg_remote.tv_mac", ""))
+        self.state.add_activity("Удаление ТВ", True, tv_ip)
         self.refresh_view()
 

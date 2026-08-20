@@ -258,12 +258,14 @@ class TVClient:
         self,
         ip: str,
         port: int = 3000,
+        client_key: str = "",
         client_key_file: Optional[str] = None,
         max_retries: int = 3,
     ) -> None:
         self.ip = ip
         self.port = port
         self.max_retries = max_retries
+        self._client_key = client_key
         self.client_key_file = client_key_file or default_key_file()
 
         self.websocket: Any = None
@@ -334,6 +336,7 @@ class TVClient:
 
     def forget_client_key(self) -> bool:
         """Remove the stored pairing key. Reconnect afterwards."""
+        self._client_key = ""
         try:
             path = Path(self.client_key_file)
             if path.exists():
@@ -343,6 +346,10 @@ class TVClient:
         except OSError as exc:
             logger.warning("Не удалось удалить client-key: %s", exc)
             return False
+
+    @property
+    def client_key(self) -> str:
+        return self._client_key
 
     # ── commands ───────────────────────────────────────────────────────────
     def request(self, uri: str, payload: dict, timeout: float = 8.0) -> dict:
@@ -557,19 +564,20 @@ class TVClient:
         return None
 
     def _build_register_msg(self) -> dict:
-        # Манифест отправляется всегда (как в pywebostv): права на сервисы
-        # (в т.ч. CONTROL_MOUSE_AND_KEYBOARD для pointer-сокета) привязываются
-        # к манифесту, идущему вместе с client-key при регистрации.
         payload = {
             "forcePairing": False,
             "pairingType": "PROMPT",
             "manifest": MANIFEST,
         }
-        if os.path.exists(self.client_key_file):
-            with open(self.client_key_file, "r", encoding="utf-8") as f:
-                client_key = json.load(f).get("client-key")
-            if client_key:
-                payload["client-key"] = client_key
+        key = self._client_key
+        if not key and os.path.exists(self.client_key_file):
+            try:
+                with open(self.client_key_file, "r", encoding="utf-8") as f:
+                    key = json.load(f).get("client-key", "")
+            except Exception:
+                pass
+        if key:
+            payload["client-key"] = key
         return {"type": "register", "id": REGISTER_ID, "payload": payload}
 
     async def _request_async(self, uri: str, payload: dict) -> dict:
@@ -680,6 +688,7 @@ class TVClient:
             payload = msg.get("payload") or {}
             client_key = payload.get("client-key")
             if client_key:
+                self._client_key = client_key
                 self._save_client_key(client_key)
             if client_key or msg_id == REGISTER_ID or mtype == "registered":
                 self.paired = True
