@@ -2111,7 +2111,9 @@ class LGRemoteApp:
             if e.pixels >= 0:
                 _pulled[0] = False
 
-        tv_items: list[ft.Control] = []
+        tv_items: list[ft.Control] = [
+            ft.Container(height=1),
+        ]
         if self.state.discovery_in_progress:
             tv_items.append(
                 ft.Row(
