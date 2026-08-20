@@ -19,11 +19,9 @@ target_arch = ["arm64-v8a"]
 split_per_abi = false
 
 [tool.flet.android.permission]
-permissions = [
-    "android.permission.INTERNET",
-    "android.permission.ACCESS_NETWORK_STATE",
-    "android.permission.CHANGE_WIFI_MULTICAST_STATE",
-]
+internet = true
+access_network_state = true
+change_wifi_multicast_state = true
 
 [tool.flet.app]
 exclude = [
