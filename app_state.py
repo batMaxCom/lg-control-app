@@ -51,6 +51,7 @@ class RemoteState:
     last_tv_ip: str = ""
     discovery_in_progress: bool = False
     tv_keys: dict[str, str] = field(default_factory=dict)
+    saved_tvs: list[dict[str, Any]] = field(default_factory=list)
 
     def add_activity(self, label: str, ok: bool, detail: str = "") -> None:
         self.activity.insert(

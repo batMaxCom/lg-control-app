@@ -71,6 +71,7 @@ class LGRemoteApp:
         tv_mac: str = "",
         discovered_tvs_json: str = "",
         tv_keys_json: str = "",
+        saved_tvs_json: str = "",
     ) -> None:
         self.page = page
         self.prefs = prefs
@@ -80,8 +81,10 @@ class LGRemoteApp:
         self._last_connection_snapshot: tuple[Any, ...] | None = None
         self._discovered_tvs_raw = discovered_tvs_json
         self._tv_keys_raw = tv_keys_json
+        self._saved_tvs_raw = saved_tvs_json
         self._discovery_cancel: asyncio.Event | None = None
         self._discovery_loop: asyncio.AbstractEventLoop | None = None
+        self._pending_save_ip: str | None = None
 
         self.header_host = ft.Container()
         self.tabs_host = ft.Container()
@@ -109,13 +112,17 @@ class LGRemoteApp:
 
         self.state.discovered_tvs = self._load_discovered_tvs()
         self.state.tv_keys = self._load_tv_keys()
+        self.state.saved_tvs = self._load_saved_tvs()
 
         # Restore last successful TV connection if manual IP is empty.
         if not self.state.tv_ip:
-            for saved_tv in self.state.discovered_tvs:
+            for saved_tv in self.state.saved_tvs:
                 if saved_tv.get("ip") == self.state.last_tv_ip:
                     self.state.tv_ip = saved_tv.get("ip", "")
-                    self.state.tv_port = int(saved_tv.get("port", 3000))
+                    try:
+                        self.state.tv_port = int(saved_tv.get("port", 3000))
+                    except (TypeError, ValueError):
+                        self.state.tv_port = 3000
                     self.state.tv_mac = saved_tv.get("mac", "")
                     break
 
@@ -336,6 +343,18 @@ class LGRemoteApp:
                 self.refresh_view()
 
                 if connected and paired and client is not None:
+                    # Persist the pairing key as soon as pairing completes, no
+                    # matter whether it came from a stored key or a fresh PROMPT.
+                    new_key = client.client_key
+                    if new_key and ip and self.state.tv_keys.get(ip) != new_key:
+                        self.state.tv_keys[ip] = new_key
+                        self._save_tv_keys()
+                    # A manual connection that finished pairing asynchronously
+                    # (PROMPT accepted after the worker returned) still counts
+                    # as a successful manual connection.
+                    if ip and self._pending_save_ip == ip:
+                        self._pending_save_ip = None
+                        self.add_saved_tv(ip, self.state.tv_port, self.state.tv_mac)
                     if not pointer:
                         self.page.run_thread(self._connect_pointer_worker)
                     # Pairing may complete asynchronously after the WebSocket was
@@ -353,6 +372,7 @@ class LGRemoteApp:
         ip: str | None = None,
         port: int | None = None,
         mac: str | None = None,
+        save_to_saved: bool = False,
     ) -> None:
         connect_ip = ip if ip is not None else self.state.tv_ip
         connect_port = port if port is not None else self.state.tv_port
@@ -369,6 +389,11 @@ class LGRemoteApp:
 
         self.state.connection_stage = "connecting"
         self.refresh_view()
+
+        # Remember whether this attempt should end up in the saved list. The
+        # flag is consumed either right after a successful connect below or
+        # by the connection monitor when PROMPT pairing completes later.
+        self._pending_save_ip = connect_ip if save_to_saved else None
 
         if self.client is not None:
             self.client.close()
@@ -391,8 +416,10 @@ class LGRemoteApp:
             if new_key:
                 self.state.tv_keys[connect_ip] = new_key
                 self._save_tv_keys()
-            import asyncio as _aio
-            _aio.run(self.prefs.set("lg_remote.last_tv_ip", connect_ip))
+            self._persist("lg_remote.last_tv_ip", connect_ip)
+            if save_to_saved:
+                self._pending_save_ip = None
+                self.add_saved_tv(connect_ip, connect_port, self.state.tv_mac)
             self._load_section_data(self.state.active_section)
         else:
             self.state.connection_stage = "pairing"
@@ -2047,22 +2074,26 @@ class LGRemoteApp:
             await self.prefs.set("lg_remote.tv_port", port_value)
             await self.prefs.set("lg_remote.tv_mac", mac_value)
 
+            # Only a successful manual connection adds the TV to saved list.
             self.page.run_thread(
                 self._connect_worker,
                 ip=host,
                 port=port_value,
                 mac=mac_value or None,
+                save_to_saved=True,
             )
 
         return ft.Column(
             spacing=14,
             controls=[
+                self._saved_tvs_section(),
+                section_title("Поиск в сети", "Потяните список вниз или нажмите обновление. Тап по устройству — подключиться и сохранить"),
                 self._tv_list_section(),
                 section_title("Ручная настройка", "Введите IP адрес вручную"),
                 glass_panel(
                     ft.Column(
                         spacing=10,
-                        controls=[ip, port, mac, pill_button("Сохранить и подключиться", icon=ft.Icons.WIFI, active=True, on_click=save)],
+                        controls=[ip, port, mac, pill_button("Подключиться и сохранить", icon=ft.Icons.WIFI, active=True, on_click=save)],
                     )
                 ),
                 glass_panel(
@@ -2100,20 +2131,97 @@ class LGRemoteApp:
             ],
         )
 
+    def _saved_tvs_section(self) -> ft.Control:
+        """Persisted TVs. Populated only after a successful manual connection."""
+        items: list[ft.Control] = []
+        for tv in self.state.saved_tvs:
+            tv_ip_val = str(tv.get("ip", ""))
+            tv_name = str(tv.get("name") or tv_ip_val)
+            is_current = tv_ip_val == self.state.tv_ip
+            items.append(
+                ft.Row(
+                    controls=[
+                        ft.Container(
+                            content=pill_button(
+                                f"{tv_name} ({tv_ip_val})",
+                                icon=ft.Icons.TV if not is_current else ft.Icons.CHECK_CIRCLE,
+                                active=is_current,
+                                on_click=lambda _e, t=tv_ip_val: self._select_saved_tv(t),
+                            ),
+                            expand=True,
+                        ),
+                        ft.IconButton(
+                            icon=ft.Icons.DELETE_OUTLINE,
+                            icon_color=C.RED,
+                            icon_size=18,
+                            on_click=lambda _e, t=tv_ip_val: self._remove_saved_tv(t),
+                            tooltip="Удалить из сохранённых",
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+
+        if not items:
+            items.append(
+                ft.Text(
+                    "Пока нет сохранённых ТВ.\nПодключитесь через ручной ввод IP — устройство сохранится автоматически.",
+                    size=12,
+                    color=C.TEXT_3,
+                    text_align=ft.TextAlign.CENTER,
+                )
+            )
+
+        return glass_panel(
+            ft.Column(
+                spacing=6,
+                controls=[
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        controls=[
+                            ft.Text("Сохранённые ТВ", size=16, color=C.TEXT, weight=ft.FontWeight.W_600),
+                            ft.Text(str(len(self.state.saved_tvs)), size=12, color=C.TEXT_3),
+                        ],
+                    ),
+                    *items,
+                ],
+            )
+        )
+
     def _tv_list_section(self) -> ft.Control:
-        """Pull-to-refresh TV list. Pull down to start SSDP search."""
-        _pulled = [False]
+        """Network search results. Informational only — tap does not connect or save."""
+        pull = [0.0]
+        PULL_THRESHOLD = 70.0
 
-        def _on_scroll(e: ft.ScrollEvent) -> None:
-            if e.pixels < -80 and not _pulled[0]:
-                _pulled[0] = True
-                self._discover_tvs_with_progress(e)
-            if e.pixels >= 0:
-                _pulled[0] = False
+        def _on_scroll(e: ft.OnScrollEvent) -> None:
+            if e.event_type == ft.ScrollType.OVERSCROLL:
+                overscroll = e.overscroll or 0.0
+                if overscroll < 0:
+                    pull[0] += -overscroll
+                    if pull[0] >= PULL_THRESHOLD and not self.state.discovery_in_progress:
+                        pull[0] = 0.0
+                        self._discover_tvs_with_progress(e)
+                else:
+                    pull[0] = 0.0
+            else:
+                pull[0] = 0.0
 
-        tv_items: list[ft.Control] = [
-            ft.Container(height=1),
-        ]
+        header = ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            controls=[
+                ft.Text("Найденные устройства", size=16, color=C.TEXT, weight=ft.FontWeight.W_600),
+                ft.IconButton(
+                    icon=ft.Icons.REFRESH,
+                    icon_color=C.CYAN,
+                    icon_size=20,
+                    tooltip="Найти телевизоры",
+                    on_click=self._discover_tvs_with_progress,
+                ),
+            ],
+        )
+
+        tv_items: list[ft.Control] = []
         if self.state.discovery_in_progress:
             tv_items.append(
                 ft.Row(
@@ -2128,29 +2236,34 @@ class LGRemoteApp:
             for tv in self.state.discovered_tvs:
                 tv_ip_val = tv["ip"]
                 tv_name = tv.get("name", tv_ip_val)
-                is_current = tv_ip_val == self.state.tv_ip
+                is_saved = any(t.get("ip") == tv_ip_val for t in self.state.saved_tvs)
                 tv_items.append(
-                    ft.Row(
-                        controls=[
-                            ft.Container(
-                                content=pill_button(
-                                    f"{tv_name} ({tv_ip_val})",
-                                    icon=ft.Icons.TV if not is_current else ft.Icons.CHECK_CIRCLE,
-                                    active=is_current,
-                                    on_click=lambda _e, t=tv_ip_val: self._select_discovered_tv(t),
+                    ft.Container(
+                        ink=True,
+                        ink_color="#18FFFFFF",
+                        border_radius=12,
+                        on_click=lambda _e, t=tv_ip_val: self._select_discovered_tv(t),
+                        tooltip="Подключиться и сохранить",
+                        content=ft.Row(
+                            spacing=10,
+                            controls=[
+                                ft.Icon(
+                                    ft.Icons.CHECK_CIRCLE if is_saved else ft.Icons.SETTINGS_INPUT_ANTENNA,
+                                    size=18,
+                                    color=C.GREEN if is_saved else C.TEXT_3,
                                 ),
-                                expand=True,
-                            ),
-                            ft.IconButton(
-                                icon=ft.Icons.CLOSE,
-                                icon_color=C.RED,
-                                icon_size=18,
-                                on_click=lambda _e, t=tv_ip_val: self._remove_discovered_tv(t),
-                                tooltip="Удалить",
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                ft.Column(
+                                    spacing=1,
+                                    expand=True,
+                                    controls=[
+                                        ft.Text(tv_name, size=13, color=C.TEXT, max_lines=1),
+                                        ft.Text(tv_ip_val, size=11, color=C.TEXT_3),
+                                    ],
+                                ),
+                                ft.Icon(ft.Icons.CHEVRON_RIGHT, size=18, color=C.TEXT_3),
+                            ],
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
                     )
                 )
         else:
@@ -2158,12 +2271,17 @@ class LGRemoteApp:
                 ft.Text("Устройства не найдены", size=13, color=C.TEXT_3, text_align=ft.TextAlign.CENTER)
             )
 
+        # Spacer keeps the list scrollable even with few items so that
+        # pull-to-refresh (overscroll) always fires.
+        tv_items.append(ft.Container(height=200))
+
         return glass_panel(
             ft.Column(
                 spacing=6,
                 controls=[
+                    header,
                     ft.Container(
-                        height=280,
+                        height=240,
                         content=ft.ListView(
                             on_scroll=_on_scroll,
                             controls=tv_items,
@@ -2268,47 +2386,55 @@ class LGRemoteApp:
                 merged[ip] = {**merged.get(ip, {}), **item}
         return list(merged.values())
 
-    def _save_discovered_tvs(self, tvs: list[dict[str, str]]) -> None:
-        import json as _json
-        import concurrent.futures
+    def _persist(self, key: str, value: Any) -> None:
+        """Schedule a prefs write on the page event loop (safe from threads)."""
+        self.page.run_task(self._persist_worker, key, value)
+
+    async def _persist_worker(self, key: str, value: Any) -> None:
         try:
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                pool.submit(
-                    lambda: __import__('asyncio').run(self.prefs.set("lg_remote.discovered_tvs", _json.dumps(tvs)))
-                ).result(timeout=3)
-        except Exception:
-            pass
+            ok = await self.prefs.set(key, value)
+            if not ok:
+                print(f"[PREFS] Не удалось сохранить {key}")
+        except Exception as exc:
+            print(f"[PREFS] Ошибка сохранения {key}: {exc}")
+
+    def _save_discovered_tvs(self, tvs: list[dict[str, str]]) -> None:
+        self._persist("lg_remote.discovered_tvs", json.dumps(tvs))
 
     def _save_tv_keys(self) -> None:
-        import json as _json
-        import concurrent.futures
-        try:
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                pool.submit(
-                    lambda: __import__('asyncio').run(self.prefs.set("lg_remote.tv_keys", _json.dumps(self.state.tv_keys)))
-                ).result(timeout=3)
-        except Exception:
-            pass
+        self._persist("lg_remote.tv_keys", json.dumps(self.state.tv_keys))
+
+    def _save_saved_tvs(self) -> None:
+        self._persist("lg_remote.saved_tvs", json.dumps(self.state.saved_tvs))
 
     def _load_discovered_tvs(self) -> list[dict[str, str]]:
-        import json as _json
         try:
             raw = self._discovered_tvs_raw
             if raw:
-                return _json.loads(raw)
+                return json.loads(raw)
         except Exception:
             pass
         return []
 
     def _load_tv_keys(self) -> dict[str, str]:
-        import json as _json
         try:
             raw = self._tv_keys_raw
             if raw:
-                return _json.loads(raw)
+                return json.loads(raw)
         except Exception:
             pass
         return {}
+
+    def _load_saved_tvs(self) -> list[dict[str, Any]]:
+        try:
+            raw = self._saved_tvs_raw
+            if raw:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    return [tv for tv in data if isinstance(tv, dict) and tv.get("ip")]
+        except Exception:
+            pass
+        return []
 
     def _select_discovered_tv(self, tv_ip: str) -> None:
         if tv_ip == self.state.tv_ip and self.client and self.client.connected:
@@ -2323,7 +2449,35 @@ class LGRemoteApp:
             None,
         )
 
-        connect_port = int(selected.get("port", self.state.tv_port or 3000)) if selected else self.state.tv_port
+        try:
+            connect_port = int(selected.get("port", 3000)) if selected else self.state.tv_port
+        except (TypeError, ValueError):
+            connect_port = 3000
+        connect_mac = selected.get("mac", "") if selected else ""
+
+        self.state.connection_stage = "connecting"
+        self.state.pointer_connected = False
+        self.refresh_view()
+        # Successful connection adds the TV to the saved list.
+        self._connect_worker(ip=tv_ip, port=connect_port, mac=connect_mac or None, save_to_saved=True)
+
+    def _select_saved_tv(self, tv_ip: str) -> None:
+        if tv_ip == self.state.tv_ip and self.client and self.client.connected:
+            return
+        self.page.run_thread(self._select_saved_tv_worker, tv_ip)
+
+    def _select_saved_tv_worker(self, tv_ip: str) -> None:
+        if self.client is not None:
+            self.client.close()
+        selected = next(
+            (tv for tv in self.state.saved_tvs if tv.get("ip") == tv_ip),
+            None,
+        )
+
+        try:
+            connect_port = int(selected.get("port", 3000)) if selected else self.state.tv_port
+        except (TypeError, ValueError):
+            connect_port = 3000
         connect_mac = selected.get("mac", "") if selected else ""
 
         self.state.connection_stage = "connecting"
@@ -2331,56 +2485,69 @@ class LGRemoteApp:
         self.refresh_view()
         self._connect_worker(ip=tv_ip, port=connect_port, mac=connect_mac or None)
 
-    def _remove_discovered_tv(self, tv_ip: str) -> None:
-        self.page.run_thread(self._remove_discovered_tv_worker, tv_ip)
+    def add_saved_tv(self, ip: str, port: int, mac: str = "", name: str = "") -> None:
+        """Upsert a TV into the saved list. Called only after successful pairing."""
+        entry = {
+            "ip": ip,
+            "port": int(port or 3000),
+            "mac": mac or "",
+            "name": name or self._known_tv_name(ip) or f"LG TV ({ip})",
+        }
+        kept = [tv for tv in self.state.saved_tvs if tv.get("ip") != ip]
+        # Keep the previous position of an updated entry when possible.
+        updated = False
+        result: list[dict[str, Any]] = []
+        for tv in self.state.saved_tvs:
+            if tv.get("ip") == ip:
+                result.append(entry)
+                updated = True
+            else:
+                result.append(tv)
+        if not updated:
+            result = [*kept, entry]
+        self.state.saved_tvs = result
+        self._save_saved_tvs()
+        self.state.add_activity("ТВ сохранён", True, ip)
 
-    def _remove_discovered_tv_worker(self, tv_ip: str) -> None:
-        import asyncio as _aio
-        import json as _json
+    def _known_tv_name(self, ip: str) -> str:
+        for tv in self.state.discovered_tvs:
+            if tv.get("ip") == ip and tv.get("name"):
+                return str(tv["name"])
+        return ""
 
+    def _remove_saved_tv(self, tv_ip: str) -> None:
+        self.page.run_thread(self._remove_saved_tv_worker, tv_ip)
+
+    def _remove_saved_tv_worker(self, tv_ip: str) -> None:
         was_current = tv_ip == self.state.tv_ip
 
         if was_current and self.client is not None:
             self.client.close()
-            self.client.forget_client_key()
             self.client = None
 
-        # Remove TV from discovery cache.
-        self.state.discovered_tvs = [
-            tv for tv in self.state.discovered_tvs if tv.get("ip") != tv_ip
+        self.state.saved_tvs = [
+            tv for tv in self.state.saved_tvs if tv.get("ip") != tv_ip
         ]
-        await_set = [
-            ("lg_remote.discovered_tvs", _json.dumps(self.state.discovered_tvs)),
-        ]
+        self._save_saved_tvs()
 
-        # Remove saved pairing key.
+        # Remove the pairing key bound to this TV.
         if tv_ip in self.state.tv_keys:
             del self.state.tv_keys[tv_ip]
-        await_set.append(("lg_remote.tv_keys", _json.dumps(self.state.tv_keys)))
+            self._save_tv_keys()
 
         if was_current:
-            # Clear all connection data, including manual connection fields.
             self.state.tv_ip = ""
             self.state.tv_mac = ""
             self.state.tv_port = 3000
             self.state.connection_stage = "not_configured"
             self.state.pointer_connected = False
-            await_set.extend([
-                ("lg_remote.tv_ip", ""),
-                ("lg_remote.last_tv_ip", ""),
-                ("lg_remote.tv_mac", ""),
-                ("lg_remote.tv_port", 3000),
-                ("lg_remote.discovered_tvs", json.dumps(
-                    self.state.discovered_tvs
-                )),
-            ])
-
-        for key, value in await_set:
-            _aio.run(self.prefs.set(key, value))
+            self._persist("lg_remote.tv_ip", "")
+            self._persist("lg_remote.last_tv_ip", "")
+            self._persist("lg_remote.tv_mac", "")
+            self._persist("lg_remote.tv_port", 3000)
 
         self.state.add_activity("Удаление ТВ", True, tv_ip)
         self.refresh_view()
-
 
     async def _reset_all_connections(self, e):
         """Full reset: remove saved TVs, keys and disable restoring deleted devices."""
@@ -2395,6 +2562,7 @@ class LGRemoteApp:
 
         self.state.discovered_tvs = []
         self.state.tv_keys = {}
+        self.state.saved_tvs = []
         self.state.tv_ip = ""
         self.state.tv_mac = ""
         self.state.tv_port = 3000
@@ -2409,6 +2577,7 @@ class LGRemoteApp:
             "lg_remote.tv_port": 3000,
             "lg_remote.tv_keys": _json.dumps({}),
             "lg_remote.discovered_tvs": _json.dumps([]),
+            "lg_remote.saved_tvs": _json.dumps([]),
         }
 
         for key, value in values.items():

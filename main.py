@@ -19,6 +19,7 @@ async def main(page: ft.Page) -> None:
     last_ip = await prefs.get("lg_remote.last_tv_ip")
     discovered_tvs_json = await prefs.get("lg_remote.discovered_tvs") or ""
     tv_keys_json = await prefs.get("lg_remote.tv_keys") or ""
+    saved_tvs_json = await prefs.get("lg_remote.saved_tvs") or ""
 
     tv_ip = str(saved_ip or last_ip or "").strip()
     try:
@@ -35,6 +36,7 @@ async def main(page: ft.Page) -> None:
         tv_mac=tv_mac,
         discovered_tvs_json=discovered_tvs_json,
         tv_keys_json=tv_keys_json,
+        saved_tvs_json=saved_tvs_json,
     )
     app.mount()
 
